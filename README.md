@@ -20,18 +20,40 @@ Records from your microphone, transcribes ultra-fast via OpenRouter (Whisper), t
 ## 🚀 Quick Install
 
 ```bash
-# Create the plugins directory
+curl -sSL "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/install.sh" | bash
+```
+
+The installer will ask for your API key, model, and keybinding — then download, configure, and set up everything.
+
+### Non-interactive / CLI flags
+
+```bash
+curl -sSL "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/install.sh" | bash -s -- \
+  --api-key "sk-or-v1-..." \
+  --model "deepseek/deepseek-v4-flash" \
+  --keybind "Ctrl y" \
+  --non-interactive
+```
+
+| Flag               | Default                        | Description                |
+| ------------------ | ------------------------------ | -------------------------- |
+| `--api-key`         | `$OPENROUTER_API_KEY` env var   | Your OpenRouter API key    |
+| `--model`           | `deepseek/deepseek-v4-flash`    | LLM model for text cleanup |
+| `--keybind`         | `Ctrl y`                        | Keybinding to trigger      |
+| `--config`          | `~/.config/zellij/config.kdl`   | Zellij config path         |
+| `--non-interactive` | (prompts)                      | Skip prompts               |
+| `-h`, `--help`        | —                              | Show all options           |
+
+### Manual install (no script)
+
+```bash
 mkdir -p ~/.config/zellij/plugins
 
-# Download the WASM plugin
-curl -L "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/zellij_whisper_talk.wasm" \
+curl -sSL "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/zellij_whisper_talk.wasm" \
   -o ~/.config/zellij/plugins/zellij_whisper_talk.wasm
 
-# Download the host script (handles audio recording + API calls)
-curl -L "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/transcribe.py" \
+curl -sSL "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/transcribe.py" \
   -o ~/.config/zellij/plugins/transcribe.py
-
-# Make it executable
 chmod +x ~/.config/zellij/plugins/transcribe.py
 ```
 

@@ -29,4 +29,5 @@ jobs:
           files: |
             target/wasm32-wasip1/release/zellij_whisper_talk.wasm
             scripts/transcribe.py
+            scripts/install.sh
           generate_release_notes: true

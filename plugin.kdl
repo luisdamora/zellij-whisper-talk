@@ -5,7 +5,7 @@ layout {
     pane
     floating_panes {
         pane x="30%" y="30%" width="40%" height="40%" {
-            plugin location="file:/mnt/E608E9D408E9A431/Caprinosol/zellij-voice-input/target/wasm32-wasip1/release/zellij_whisper_talk.wasm" {
+            plugin location="file:/mnt/E608E9D408E9A431/Caprinosol/zellij-voice-input/target/wasm32-wasip1/release/zellij-whisper-talk.wasm" {
                 script_path "/mnt/E608E9D408E9A431/Caprinosol/zellij-voice-input/scripts/transcribe.py"
                 model "deepseek/deepseek-v4-flash"
             }
