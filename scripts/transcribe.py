@@ -24,6 +24,7 @@ def main():
         sys.exit(1)
 
     lock_file = sys.argv[1]
+    text_file = lock_file.rsplit(".", 1)[0] + ".txt"
     
     # Get configuration from env vars
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -162,6 +163,13 @@ def main():
     except Exception as e:
         print(f"Cleanup error: {e}", file=sys.stderr)
         cleaned_text = raw_text
+
+    # Write to tmp file for delayed injection
+    try:
+        with open(text_file, "w") as f:
+            f.write(cleaned_text)
+    except Exception as e:
+        print(f"Error writing text file: {e}", file=sys.stderr)
 
     # Print result to stdout for Zellij plugin to capture
     print(cleaned_text)

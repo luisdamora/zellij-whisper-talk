@@ -46,6 +46,8 @@ struct State {
     animation_tick: usize,
     seconds_elapsed: f32,
     timer_active: bool,
+    // Unique ID
+    plugin_id: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +95,9 @@ impl ZellijPlugin for State {
             .cloned()
             .unwrap_or_else(|| "/mnt/E608E9D408E9A431/Caprinosol/zellij-voice-input/scripts/transcribe.py".to_string());
 
+        self.plugin_id = get_plugin_ids().plugin_id;
         self.initialized = true;
-        eprintln!("Zellij Whisper Talk: load() complete. Initialized: {}, script_path: {}", self.initialized, self.script_path);
+        eprintln!("Zellij Whisper Talk: load() complete. Initialized: {}, script_path: {}, plugin_id: {}", self.initialized, self.script_path, self.plugin_id);
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -130,7 +133,8 @@ impl ZellijPlugin for State {
                     BareKey::Esc => {
                         self.timer_active = false;
                         if self.recording_state == RecordingState::Recording {
-                            run_command(&["rm", "-f", "/tmp/zellij-voice.recording"], BTreeMap::new());
+                            let lock_file = format!("/tmp/zellij-voice-{}.recording", self.plugin_id);
+                            run_command(&["rm", "-f", &lock_file], BTreeMap::new());
                         }
                         close_self();
                     }
@@ -150,7 +154,9 @@ impl ZellijPlugin for State {
                         RecordingState::Done => {
                             if self.seconds_elapsed >= 1.2 {
                                 self.timer_active = false;
-                                write_chars(&self.transcription_text);
+                                let text_file = format!("/tmp/zellij-voice-{}.txt", self.plugin_id);
+                                let cmd = format!("python3 -c \"import subprocess, time, os; time.sleep(0.15); text = open('{}').read(); subprocess.run(['zellij', 'action', 'write-chars', text]); os.remove('{}')\"", text_file, text_file);
+                                run_command(&["sh", "-c", &cmd], BTreeMap::new());
                                 close_self();
                             } else {
                                 set_timeout(0.1);
@@ -449,15 +455,19 @@ impl State {
         self.timer_active = true;
         set_timeout(0.1);
 
-        // Run the script: env OPENROUTER_API_KEY=xxx OPENROUTER_MODEL=yyy python3 transcribe.py /tmp/zellij-voice.recording
+        let lock_file = format!("/tmp/zellij-voice-{}.recording", self.plugin_id);
+        let audio_env = format!("AUDIO_PATH=/tmp/zellij-voice-{}.wav", self.plugin_id);
+
+        // Run the script: env OPENROUTER_API_KEY=xxx OPENROUTER_MODEL=yyy AUDIO_PATH=... python3 transcribe.py /tmp/zellij-voice-ID.recording
         run_command(
             &[
                 "env",
                 &api_key_env,
                 &model_env,
+                &audio_env,
                 "python3",
                 &self.script_path,
-                "/tmp/zellij-voice.recording",
+                &lock_file,
             ],
             context,
         );
@@ -465,8 +475,9 @@ impl State {
 
     fn stop_recording(&mut self) {
         self.recording_state = RecordingState::Transcribing;
+        let lock_file = format!("/tmp/zellij-voice-{}.recording", self.plugin_id);
 
         // Delete lock file to signal python script to stop recording
-        run_command(&["rm", "-f", "/tmp/zellij-voice.recording"], BTreeMap::new());
+        run_command(&["rm", "-f", &lock_file], BTreeMap::new());
     }
 }

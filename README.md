@@ -20,12 +20,20 @@ Records from your microphone, transcribes ultra-fast via OpenRouter (Whisper), t
 ## 🚀 Quick Install
 
 ```bash
-mkdir -p ~/.config/zellij/plugins && \
-  curl -L "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/zellij_whisper_talk.wasm" \
-    -o ~/.config/zellij/plugins/zellij_whisper_talk.wasm
-```
+# Create the plugins directory
+mkdir -p ~/.config/zellij/plugins
 
-Then add the keybinding below to your Zellij config.
+# Download the WASM plugin
+curl -L "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/zellij_whisper_talk.wasm" \
+  -o ~/.config/zellij/plugins/zellij_whisper_talk.wasm
+
+# Download the host script (handles audio recording + API calls)
+curl -L "https://github.com/luisdamora/zellij-whisper-talk/releases/latest/download/transcribe.py" \
+  -o ~/.config/zellij/plugins/transcribe.py
+
+# Make it executable
+chmod +x ~/.config/zellij/plugins/transcribe.py
+```
 
 ## ⌨️ Keybinding
 
@@ -36,7 +44,7 @@ shared_except "locked" {
     bind "Ctrl y" {
         LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zellij_whisper_talk.wasm" {
             floating true
-            script_path "/path/to/transcribe.py"
+            script_path "~/.config/zellij/plugins/transcribe.py"
             model "deepseek/deepseek-v4-flash"
             api_key "sk-or-v1-..."   // optional — falls back to $OPENROUTER_API_KEY env var
         }
@@ -45,8 +53,10 @@ shared_except "locked" {
 ```
 
 > [!TIP]
-> Copy the `scripts/transcribe.py` file from this repo to a permanent location (e.g. `~/.config/zellij/plugins/transcribe.py`) and point `script_path` there.
-> Make sure to export your API key: `export OPENROUTER_API_KEY="sk-or-v1-..."` if you don't hardcode it in the config.
+> If you prefer not to hardcode your API key, export it in your shell config instead:
+> ```bash
+> export OPENROUTER_API_KEY="sk-or-v1-..."
+> ```
 
 ## 🎮 How to Use
 
