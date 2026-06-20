@@ -74,6 +74,19 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required but not found."
 success "curl, python3 available"
 
 # ── Interactive prompts ─────────────────────────────────────────────────────
+# When run via `curl ... | bash`, the script arrives on stdin (fd 0), so any
+# `read` would consume the script's own lines instead of the user's input.
+# Reopen stdin from the controlling terminal so prompts read the keyboard.
+if $INTERACTIVE && [[ ! -t 0 ]]; then
+    if [[ -e /dev/tty ]]; then
+        exec < /dev/tty
+    else
+        warn "No terminal available for prompts — falling back to non-interactive mode."
+        INTERACTIVE=false
+        [[ -z "$API_KEY" ]] && fail "API key is required. Use --api-key or set OPENROUTER_API_KEY."
+    fi
+fi
+
 if $INTERACTIVE; then
     section "Configuration"
 
@@ -129,14 +142,19 @@ section "Configuring Zellij"
 
 mkdir -p "$ZELLIJ_DIR"
 
-KEYBIND_BLOCK=$(cat <<KDL
+# Self-contained keybinds block. Zellij merges multiple top-level `keybinds {}`
+# blocks, and `shared_except` MUST be nested inside one — so we always wrap it,
+# both when appending to an existing config and when creating a fresh one.
+KEYBINDS_BLOCK=$(cat <<KDL
 
-shared_except "locked" {
-    bind "${KEYBIND}" {
-        LaunchOrFocusPlugin "file:${PLUGINS_DIR}/zellij_whisper_talk.wasm" {
-            floating true
-            script_path "${PLUGINS_DIR}/transcribe.py"
-            model "${MODEL}"
+keybinds {
+    shared_except "locked" {
+        bind "${KEYBIND}" {
+            LaunchOrFocusPlugin "file:${PLUGINS_DIR}/zellij_whisper_talk.wasm" {
+                floating true
+                script_path "${PLUGINS_DIR}/transcribe.py"
+                model "${MODEL}"
+            }
         }
     }
 }
@@ -153,17 +171,13 @@ if [[ -f "$CONFIG_FILE" ]]; then
         warn "Plugin already configured in $CONFIG_FILE — skipping config injection."
         echo "  Backup saved to: $BACKUP"
     else
-        echo "$KEYBIND_BLOCK" >> "$CONFIG_FILE"
+        echo "$KEYBINDS_BLOCK" >> "$CONFIG_FILE"
         success "Keybinding appended to $CONFIG_FILE"
         echo "  Backup saved to: $BACKUP"
     fi
 else
     # Create fresh config
-    cat > "$CONFIG_FILE" <<KDL
-keybinds {
-${KEYBIND_BLOCK}
-}
-KDL
+    echo "$KEYBINDS_BLOCK" > "$CONFIG_FILE"
     success "Created new config at $CONFIG_FILE"
 fi
 
