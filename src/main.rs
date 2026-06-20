@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
+// Pure leaf modules (no zellij-tile dependency). Unit-tested.
+mod config;
+mod sanitize;
+
 // ANSI Escape Codes for premium styling
 const COLOR_RESET: &str = "\x1b[0m";
 const COLOR_BOLD: &str = "\x1b[1m";
@@ -36,10 +40,8 @@ struct State {
     recording_state: RecordingState,
     transcription_text: String,
     error_message: String,
-    // Configuration properties
-    api_key: String,
-    model: String,
-    script_path: String,
+    // Configuration (resolved in load() via PluginConfig::from_btreemap).
+    config: config::PluginConfig,
     initialized: bool,
     permissions_granted: bool,
     // Animation & timing
@@ -55,6 +57,7 @@ enum RecordingState {
     Idle,
     Recording,
     Transcribing,
+    Confirming,
     Done,
     Error,
 }
@@ -70,7 +73,7 @@ register_plugin!(State);
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         eprintln!("Zellij Whisper Talk: load() started");
-        
+
         // Subscribe to events
         subscribe(&[
             EventType::Key,
@@ -79,25 +82,16 @@ impl ZellijPlugin for State {
             EventType::Timer,
         ]);
 
-        // Read configuration
-        self.api_key = configuration
-            .get("api_key")
-            .cloned()
-            .unwrap_or_default();
-        
-        self.model = configuration
-            .get("model")
-            .cloned()
-            .unwrap_or_else(|| "deepseek/deepseek-v4-flash".to_string());
-        
-        self.script_path = configuration
-            .get("script_path")
-            .cloned()
-            .unwrap_or_else(|| "/mnt/E608E9D408E9A431/Caprinosol/zellij-voice-input/scripts/transcribe.py".to_string());
+        // Read configuration through the pure parser (all keys optional,
+        // backward compatible).
+        self.config = config::PluginConfig::from_btreemap(&configuration);
 
         self.plugin_id = get_plugin_ids().plugin_id;
         self.initialized = true;
-        eprintln!("Zellij Whisper Talk: load() complete. Initialized: {}, script_path: {}, plugin_id: {}", self.initialized, self.script_path, self.plugin_id);
+        eprintln!(
+            "Zellij Whisper Talk: load() complete. Initialized: {}, script_path: {}, plugin_id: {}, confirm_inject: {}",
+            self.initialized, self.config.script_path, self.plugin_id, self.config.confirm_inject
+        );
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -107,6 +101,11 @@ impl ZellijPlugin for State {
         match event {
             Event::Key(key) => {
                 match key.bare_key {
+                    // Enter in Confirming confirms injection (spec injection-confirmation).
+                    BareKey::Enter if self.recording_state == RecordingState::Confirming => {
+                        self.inject_text_and_close();
+                        should_render = true;
+                    }
                     BareKey::Char(' ') | BareKey::Enter => {
                         match self.recording_state {
                             RecordingState::Idle | RecordingState::Error => {
@@ -132,9 +131,18 @@ impl ZellijPlugin for State {
                     }
                     BareKey::Esc => {
                         self.timer_active = false;
-                        if self.recording_state == RecordingState::Recording {
-                            let lock_file = format!("/tmp/zellij-voice-{}.recording", self.plugin_id);
-                            run_command(&["rm", "-f", &lock_file], BTreeMap::new());
+                        match self.recording_state {
+                            RecordingState::Recording => {
+                                // Stop the recorder by removing the lock file.
+                                let lock_file = lock_file_path(self.plugin_id);
+                                run_command(&["rm", "-f", &lock_file], BTreeMap::new());
+                            }
+                            RecordingState::Confirming => {
+                                // Spec: do NOT inject; remove the temp text file; close.
+                                let text_file = text_file_path(self.plugin_id);
+                                run_command(&["rm", "-f", &text_file], BTreeMap::new());
+                            }
+                            _ => {}
                         }
                         close_self();
                     }
@@ -148,19 +156,39 @@ impl ZellijPlugin for State {
                     should_render = true;
 
                     match self.recording_state {
-                        RecordingState::Recording | RecordingState::Transcribing => {
+                        RecordingState::Recording => {
+                            // Watchdog (spec recording-lifecycle): auto-stop at the cap.
+                            if recording_exceeded_max_duration(
+                                self.seconds_elapsed,
+                                self.config.max_duration,
+                            ) {
+                                eprintln!(
+                                    "Zellij Whisper Talk: max duration {}s reached, auto-stopping",
+                                    self.config.max_duration
+                                );
+                                self.error_message = format!(
+                                    "Max duration ({}s) reached — stopping",
+                                    self.config.max_duration
+                                );
+                                self.stop_recording();
+                            }
+                            set_timeout(0.1);
+                        }
+                        RecordingState::Transcribing => {
                             set_timeout(0.1);
                         }
                         RecordingState::Done => {
+                            // Legacy instant-paste path (confirm_inject=false):
+                            // brief display, then inject + close.
                             if self.seconds_elapsed >= 1.2 {
-                                self.timer_active = false;
-                                let text_file = format!("/tmp/zellij-voice-{}.txt", self.plugin_id);
-                                let cmd = format!("python3 -c \"import subprocess, time, os; time.sleep(0.15); text = open('{}').read(); subprocess.run(['zellij', 'action', 'write-chars', text]); os.remove('{}')\"", text_file, text_file);
-                                run_command(&["sh", "-c", &cmd], BTreeMap::new());
-                                close_self();
+                                self.inject_text_and_close();
                             } else {
                                 set_timeout(0.1);
                             }
+                        }
+                        RecordingState::Confirming => {
+                            // Wait for Enter/Esc — no timer-driven action.
+                            self.timer_active = false;
                         }
                         _ => {
                             self.timer_active = false;
@@ -173,12 +201,26 @@ impl ZellijPlugin for State {
                     if exit_code == Some(0) {
                         let text = String::from_utf8_lossy(&stdout).trim().to_string();
                         if !text.is_empty() {
-                            self.transcription_text = text;
-                            self.recording_state = RecordingState::Done;
+                            // Defense-in-depth: the sidecar already sanitized,
+                            // but apply the Rust filter too before any display/inject.
+                            self.transcription_text = sanitize::sanitize_terminal_text(&text);
+                            self.error_message.clear();
+                            // Spec injection-confirmation: gate on confirm_inject.
+                            self.recording_state =
+                                next_state_after_transcription(self.config.confirm_inject);
                             self.seconds_elapsed = 0.0;
-                            // Keep timer active to display Done screen for a bit
-                            self.timer_active = true;
-                            set_timeout(0.1);
+                            match self.recording_state {
+                                // Legacy instant-paste path keeps the timer.
+                                RecordingState::Done => {
+                                    self.timer_active = true;
+                                    set_timeout(0.1);
+                                }
+                                // Confirming waits for Enter/Esc — no timer needed.
+                                RecordingState::Confirming => {
+                                    self.timer_active = false;
+                                }
+                                _ => {}
+                            }
                         } else {
                             self.error_message = "Transcription was empty".to_string();
                             self.recording_state = RecordingState::Error;
@@ -285,6 +327,16 @@ impl ZellijPlugin for State {
                     ColorBold = COLOR_BOLD
                 );
             }
+            RecordingState::Confirming => {
+                println!(
+                    "{}{ColorBorder}│{ColorReset}          {ColorSuccess}{ColorBold}✅ Ready! Review the text{ColorReset}          {ColorBorder}│{ColorReset}",
+                    margin,
+                    ColorBorder = COLOR_BORDER,
+                    ColorReset = COLOR_RESET,
+                    ColorSuccess = COLOR_SUCCESS,
+                    ColorBold = COLOR_BOLD
+                );
+            }
             RecordingState::Error => {
                 let err_trimmed = if self.error_message.chars().count() > 30 {
                     format!("{}...", self.error_message.chars().take(27).collect::<String>())
@@ -333,20 +385,28 @@ impl ZellijPlugin for State {
                 );
             }
             RecordingState::Transcribing => {
+                // If the watchdog fired, surface its notice (otherwise default).
+                let line = if !self.error_message.is_empty() {
+                    self.error_message.clone()
+                } else {
+                    "AI is cleaning text...".to_string()
+                };
+                let len = line.chars().count();
+                let left_pad = (44 - len) / 2;
+                let right_pad = 44 - len - left_pad;
                 println!(
-                    "{}{ColorBorder}│{ColorReset}          {ColorMuted}AI is cleaning text...{ColorReset}           {ColorBorder}│{ColorReset}",
+                    "{}{ColorBorder}│{ColorReset}{}{ColorMuted}{}{ColorReset}{} {ColorBorder}│{ColorReset}",
                     margin,
+                    " ".repeat(left_pad),
+                    line,
+                    " ".repeat(right_pad),
                     ColorBorder = COLOR_BORDER,
                     ColorReset = COLOR_RESET,
                     ColorMuted = COLOR_MUTED
                 );
             }
-            RecordingState::Done => {
-                let text_preview = if self.transcription_text.chars().count() > 30 {
-                    format!("\"{}...\"", self.transcription_text.chars().take(27).collect::<String>())
-                } else {
-                    format!("\"{}\"", self.transcription_text)
-                };
+            RecordingState::Done | RecordingState::Confirming => {
+                let text_preview = text_preview(&self.transcription_text);
                 let len = text_preview.chars().count();
                 let left_pad = (44 - len) / 2;
                 let right_pad = 44 - len - left_pad;
@@ -371,7 +431,7 @@ impl ZellijPlugin for State {
                 );
             }
             RecordingState::Idle => {
-                let model_info = format!("Model: {}", self.model);
+                let model_info = format!("Model: {}", self.config.model);
                 let len = model_info.chars().count();
                 let left_pad = (44 - len) / 2;
                 let right_pad = 44 - len - left_pad;
@@ -393,6 +453,16 @@ impl ZellijPlugin for State {
             RecordingState::Recording => {
                 println!(
                     "{}{ColorBorder}│{ColorReset}        {ColorMuted}Press [Space] again to Stop{ColorReset}        {ColorBorder}│{ColorReset}",
+                    margin,
+                    ColorBorder = COLOR_BORDER,
+                    ColorReset = COLOR_RESET,
+                    ColorMuted = COLOR_MUTED
+                );
+            }
+            RecordingState::Confirming => {
+                // Spec injection-confirmation: Enter injects, Esc cancels.
+                println!(
+                    "{}{ColorBorder}│{ColorReset}      {ColorMuted}[Enter] inject   [Esc] cancel{ColorReset}      {ColorBorder}│{ColorReset}",
                     margin,
                     ColorBorder = COLOR_BORDER,
                     ColorReset = COLOR_RESET,
@@ -432,10 +502,10 @@ impl State {
         self.animation_tick = 0;
 
         // Check if API key is empty
-        if self.api_key.is_empty() {
+        if self.config.api_key.is_empty() {
             // Try to get it from environment
             if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
-                self.api_key = key;
+                self.config.api_key = key;
             } else {
                 self.error_message = "Missing OPENROUTER_API_KEY config".to_string();
                 self.recording_state = RecordingState::Error;
@@ -447,37 +517,186 @@ impl State {
         let mut context = BTreeMap::new();
         context.insert("action".to_string(), "transcribe".to_string());
 
-        // Prepare environment variables using the env helper command
-        let api_key_env = format!("OPENROUTER_API_KEY={}", self.api_key);
-        let model_env = format!("OPENROUTER_MODEL={}", self.model);
-
         // Start timer
         self.timer_active = true;
         set_timeout(0.1);
 
-        let lock_file = format!("/tmp/zellij-voice-{}.recording", self.plugin_id);
-        let audio_env = format!("AUDIO_PATH=/tmp/zellij-voice-{}.wav", self.plugin_id);
+        let lock_file = lock_file_path(self.plugin_id);
+        let audio_path = audio_file_path(self.plugin_id);
 
-        // Run the script: env OPENROUTER_API_KEY=xxx OPENROUTER_MODEL=yyy AUDIO_PATH=... python3 transcribe.py /tmp/zellij-voice-ID.recording
-        run_command(
-            &[
-                "env",
-                &api_key_env,
-                &model_env,
-                &audio_env,
-                "python3",
-                &self.script_path,
-                &lock_file,
-            ],
+        // Spec secret-protection: the API key travels in the env-variable map
+        // (never argv). argv holds only ["python3", script, lock_file] so `ps`
+        // output never contains the key. The sidecar writes a 0600 key file and
+        // scrubs its own environment.
+        let env = self.config.build_sidecar_env(&audio_path, &lock_file);
+
+        run_command_with_env_variables_and_cwd(
+            &["python3", &self.config.script_path, &lock_file],
+            env,
+            std::path::PathBuf::from("."),
             context,
         );
     }
 
     fn stop_recording(&mut self) {
         self.recording_state = RecordingState::Transcribing;
-        let lock_file = format!("/tmp/zellij-voice-{}.recording", self.plugin_id);
+        let lock_file = lock_file_path(self.plugin_id);
 
         // Delete lock file to signal python script to stop recording
         run_command(&["rm", "-f", &lock_file], BTreeMap::new());
+    }
+
+    /// Inject the transcribed text into the focused pane and close the plugin.
+    ///
+    /// Used by both the legacy auto-paste (`Done`) and the confirmation gate
+    /// (`Confirming` + Enter). The text is sanitized again here as
+    /// defense-in-depth (the sidecar already sanitized it). The temp text file
+    /// written by the sidecar is removed after injection.
+    fn inject_text_and_close(&mut self) {
+        self.timer_active = false;
+        let cleaned = sanitize::sanitize_terminal_text(&self.transcription_text);
+        run_command(
+            &["zellij", "action", "write-chars", &cleaned],
+            BTreeMap::new(),
+        );
+        let text_file = text_file_path(self.plugin_id);
+        run_command(&["rm", "-f", &text_file], BTreeMap::new());
+        close_self();
+    }
+}
+
+// --- Pure helpers (unit-tested, no zellij-tile dependency) ----------------
+
+/// Prefix shared by every temp file the plugin + sidecar exchange.
+const TEMP_PREFIX: &str = "/tmp/zellij-voice-";
+
+fn lock_file_path(plugin_id: u32) -> String {
+    format!("{}{}.recording", TEMP_PREFIX, plugin_id)
+}
+
+fn text_file_path(plugin_id: u32) -> String {
+    format!("{}{}.txt", TEMP_PREFIX, plugin_id)
+}
+
+fn audio_file_path(plugin_id: u32) -> String {
+    format!("{}{}.wav", TEMP_PREFIX, plugin_id)
+}
+
+/// Decide which state to enter after a successful transcription.
+///
+/// Spec `injection-confirmation`: with `confirm_inject` (default true) the
+/// plugin MUST show a preview and wait for Enter before pasting, so it enters
+/// [`RecordingState::Confirming`]. Disabling it restores the legacy instant
+/// paste via [`RecordingState::Done`].
+fn next_state_after_transcription(confirm_inject: bool) -> RecordingState {
+    if confirm_inject {
+        RecordingState::Confirming
+    } else {
+        RecordingState::Done
+    }
+}
+
+/// Watchdog predicate: has the recording exceeded the configured max duration?
+///
+/// Spec `recording-lifecycle`: recording longer than the cap MUST auto-stop.
+/// Fires at the boundary (>=) so exactly `max_duration` seconds triggers it.
+fn recording_exceeded_max_duration(seconds_elapsed: f32, max_duration: u32) -> bool {
+    seconds_elapsed >= max_duration as f32
+}
+
+/// Build a short, quoted preview of `text` for the Done/Confirming UI.
+///
+/// Keeps the rendered line within the fixed-width box: full text quoted when it
+/// fits (<= 30 chars), else the first 27 chars + `"..."`. Operates on `char`s
+/// so multi-byte UTF-8 (accents/emoji) is never split.
+fn text_preview(text: &str) -> String {
+    const PREVIEW_MAX: usize = 30;
+    const PREVIEW_KEEP: usize = 27;
+    if text.chars().count() > PREVIEW_MAX {
+        format!("\"{}...\"", text.chars().take(PREVIEW_KEEP).collect::<String>())
+    } else {
+        format!("\"{}\"", text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- temp path helpers (lock/text/audio share a prefix + plugin id) ---
+
+    #[test]
+    fn lock_file_path_uses_plugin_id_and_recording_suffix() {
+        assert_eq!(lock_file_path(42), "/tmp/zellij-voice-42.recording");
+    }
+
+    #[test]
+    fn text_file_path_uses_plugin_id_and_txt_suffix() {
+        assert_eq!(text_file_path(7), "/tmp/zellij-voice-7.txt");
+    }
+
+    #[test]
+    fn audio_file_path_uses_plugin_id_and_wav_suffix() {
+        assert_eq!(audio_file_path(99), "/tmp/zellij-voice-99.wav");
+    }
+
+    // --- post-transcription state (spec injection-confirmation gate) ---
+
+    #[test]
+    fn next_state_confirming_when_confirm_inject_true() {
+        assert_eq!(next_state_after_transcription(true), RecordingState::Confirming);
+    }
+
+    #[test]
+    fn next_state_done_when_confirm_inject_false() {
+        // Legacy instant-paste path.
+        assert_eq!(next_state_after_transcription(false), RecordingState::Done);
+    }
+
+    // --- max-duration watchdog (spec recording-lifecycle) ---
+
+    #[test]
+    fn watchdog_false_below_cap() {
+        assert!(!recording_exceeded_max_duration(119.9, 120));
+        assert!(!recording_exceeded_max_duration(0.0, 120));
+    }
+
+    #[test]
+    fn watchdog_true_at_and_above_cap() {
+        // Boundary: exactly max_duration triggers the auto-stop.
+        assert!(recording_exceeded_max_duration(120.0, 120));
+        assert!(recording_exceeded_max_duration(150.0, 120));
+    }
+
+    #[test]
+    fn watchdog_respects_configured_cap() {
+        // A non-default cap (e.g. 60s) is honored.
+        assert!(!recording_exceeded_max_duration(59.0, 60));
+        assert!(recording_exceeded_max_duration(60.0, 60));
+    }
+
+    // --- text preview (Done/Confirming UI helper) ---
+
+    #[test]
+    fn text_preview_short_text_is_quoted_full() {
+        assert_eq!(text_preview("hi"), "\"hi\"");
+        assert_eq!(text_preview(""), "\"\"");
+    }
+
+    #[test]
+    fn text_preview_long_text_is_truncated_with_ellipsis() {
+        let long: String = "x".repeat(40);
+        let p = text_preview(&long);
+        assert!(p.starts_with("\""));
+        assert!(p.ends_with("...\""));
+        // First 27 chars kept between the quote and the ellipsis.
+        assert_eq!(p, format!("\"{}...\"", "x".repeat(27)));
+    }
+
+    #[test]
+    fn text_preview_utf8_not_split_mid_codepoint() {
+        // Accents/emoji counted as chars, never split a multi-byte sequence.
+        let p = text_preview("áéíóú") ; // 5 chars, short -> full
+        assert_eq!(p, "\"áéíóú\"");
     }
 }
