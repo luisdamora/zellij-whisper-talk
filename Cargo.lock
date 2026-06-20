@@ -2581,7 +2581,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zellij-voice-input"
+name = "zellij-whisper-talk"
 version = "0.1.0"
 dependencies = [
  "zellij-tile",
