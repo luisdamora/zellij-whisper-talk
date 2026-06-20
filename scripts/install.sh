@@ -74,17 +74,16 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required but not found."
 success "curl, python3 available"
 
 # ── Interactive prompts ─────────────────────────────────────────────────────
-# When run via `curl ... | bash`, the script arrives on stdin (fd 0), so any
-# `read` would consume the script's own lines instead of the user's input.
-# Reopen stdin from the controlling terminal so prompts read the keyboard.
-if $INTERACTIVE && [[ ! -t 0 ]]; then
-    if [[ -e /dev/tty ]]; then
-        exec < /dev/tty
-    else
-        warn "No terminal available for prompts — falling back to non-interactive mode."
-        INTERACTIVE=false
-        [[ -z "$API_KEY" ]] && fail "API key is required. Use --api-key or set OPENROUTER_API_KEY."
-    fi
+# When run via `curl ... | bash`, the script itself is on stdin (fd 0) and bash
+# keeps reading it from there. So we must NOT touch fd 0 — instead each `read`
+# pulls from the controlling terminal /dev/tty directly. Reading from /dev/tty
+# also works when the script is launched normally (stdin already a TTY).
+# Probe by actually opening /dev/tty: the file can exist yet fail to open
+# (ENXIO) when the process has no controlling terminal, so `-r` is not enough.
+if $INTERACTIVE && ! { true < /dev/tty; } 2>/dev/null; then
+    warn "No terminal available for prompts — falling back to non-interactive mode."
+    INTERACTIVE=false
+    [[ -z "$API_KEY" ]] && fail "API key is required. Use --api-key or set OPENROUTER_API_KEY."
 fi
 
 if $INTERACTIVE; then
@@ -93,7 +92,7 @@ if $INTERACTIVE; then
     echo -e "  Press Enter to accept defaults shown in [brackets].\n"
 
     if [[ -z "$API_KEY" ]]; then
-        read -r -p "  OpenRouter API key: " API_KEY
+        read -r -p "  OpenRouter API key: " API_KEY < /dev/tty
         if [[ -z "$API_KEY" ]]; then
             fail "API key is required. Get one at https://openrouter.ai/keys"
         fi
@@ -101,10 +100,10 @@ if $INTERACTIVE; then
         echo -e "  OpenRouter API key: ${GREEN}[detected from environment]${RESET}"
     fi
 
-    read -r -p "  LLM model for text cleanup [$MODEL]: " MODEL_INPUT
+    read -r -p "  LLM model for text cleanup [$MODEL]: " MODEL_INPUT < /dev/tty
     MODEL="${MODEL_INPUT:-$MODEL}"
 
-    read -r -p "  Keybinding to trigger plugin [$KEYBIND]: " KEYBIND_INPUT
+    read -r -p "  Keybinding to trigger plugin [$KEYBIND]: " KEYBIND_INPUT < /dev/tty
     KEYBIND="${KEYBIND_INPUT:-$KEYBIND}"
 
     echo ""
@@ -114,7 +113,7 @@ if $INTERACTIVE; then
     echo -e "    Keybinding: ${CYAN}$KEYBIND${RESET}"
     echo ""
 
-    read -r -p "  Proceed with installation? [Y/n] " CONFIRM
+    read -r -p "  Proceed with installation? [Y/n] " CONFIRM < /dev/tty
     if [[ "$CONFIRM" =~ ^[Nn] ]]; then
         echo "  Aborted."
         exit 0

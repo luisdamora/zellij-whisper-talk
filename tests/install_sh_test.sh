@@ -135,12 +135,37 @@ KDL
     pass "already-configured config is detected and not duplicated"
 }
 
+# ── Test 6: interactive prompts must read from /dev/tty, never fd 0 ──
+# Under `curl | bash` the script IS fd 0, so a prompt that reads from fd 0 either
+# consumes the script's own lines (original bug) or, if fd 0 is globally redirected
+# via `exec < /dev/tty`, steals the script stream from bash and hangs. Every
+# interactive `read` must therefore pull from /dev/tty explicitly.
+test_prompts_read_from_tty() {
+    # Lines that prompt the user: `read -r -p ...`
+    local prompt_reads; prompt_reads="$(grep -nE 'read -r -p' "$INSTALL_SH" || true)"
+    [[ -n "$prompt_reads" ]] || { fail "tty: found interactive read prompts"; return; }
+
+    # Each one must be redirected from /dev/tty.
+    local missing; missing="$(grep -nE 'read -r -p' "$INSTALL_SH" | grep -v '< */dev/tty' || true)"
+    [[ -z "$missing" ]] || { fail "tty: every prompt reads from /dev/tty" "offending: ${missing}"; return; }
+    pass "every interactive prompt reads from /dev/tty"
+}
+
+# ── Test 7: must not globally redirect stdin (the curl|bash hang regression) ──
+test_no_global_stdin_redirect() {
+    grep -qE 'exec[[:space:]]*<[[:space:]]*/dev/tty' "$INSTALL_SH" \
+        && { fail "no-exec: \`exec < /dev/tty\` steals the script stream under curl|bash"; return; }
+    pass "does not globally redirect stdin via exec < /dev/tty"
+}
+
 echo "Running install.sh tests..."
 test_fresh_config_is_valid_kdl
 test_append_wraps_in_keybinds
 test_keybind_is_not_a_comment
 test_curl_pipe_form_non_interactive
 test_already_configured_is_skipped
+test_prompts_read_from_tty
+test_no_global_stdin_redirect
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
