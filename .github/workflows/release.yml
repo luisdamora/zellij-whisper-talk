@@ -20,8 +20,15 @@ jobs:
         with:
           targets: wasm32-wasip1
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Keep release builds in their own cache slot, separate from any
+          # future debug/test jobs that share the registry.
+          key: wasm32-wasip1-release
+
       - name: Build WASM
-        run: cargo build --release --target wasm32-wasip1
+        run: cargo build --release --locked --target wasm32-wasip1
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
