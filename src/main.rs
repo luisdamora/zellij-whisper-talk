@@ -286,8 +286,8 @@ impl ZellijPlugin for State {
                 );
             }
             RecordingState::Error => {
-                let err_trimmed = if self.error_message.len() > 30 {
-                    format!("{}...", &self.error_message[..27])
+                let err_trimmed = if self.error_message.chars().count() > 30 {
+                    format!("{}...", self.error_message.chars().take(27).collect::<String>())
                 } else {
                     self.error_message.clone()
                 };
@@ -342,8 +342,8 @@ impl ZellijPlugin for State {
                 );
             }
             RecordingState::Done => {
-                let text_preview = if self.transcription_text.len() > 30 {
-                    format!("\"{}...\"", &self.transcription_text[..27])
+                let text_preview = if self.transcription_text.chars().count() > 30 {
+                    format!("\"{}...\"", self.transcription_text.chars().take(27).collect::<String>())
                 } else {
                     format!("\"{}\"", self.transcription_text)
                 };
