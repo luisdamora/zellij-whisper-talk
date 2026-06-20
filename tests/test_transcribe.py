@@ -115,8 +115,12 @@ def _run(
 ):
     """Invoke run_transcription with standard fakes; return (rc, captures)."""
     if config is None:
+        # Force the backend (not "auto") so detect_backend skips real PATH
+        # probing — keeps these flow tests hermetic on headless CI where no
+        # recorder (pw-record/parec/arecord) is installed.
         config = SidecarConfig(
-            http_timeout=30, http_retries=3, max_duration=120, audio_backend="auto", confirm_inject=True
+            http_timeout=30, http_retries=3, max_duration=120,
+            audio_backend=spawn_backend, confirm_inject=True,
         )
     recorder = recorder or FakeRecorder()
     spawned = {}
