@@ -3,5 +3,13 @@ name = "zellij-whisper-talk"
 version = "0.1.0"
 edition = "2024"
 
+# The binary (and thus the .wasm artifact) is named with underscores so it
+# matches the asset name the CI uploads and the installer/config reference
+# (zellij_whisper_talk.wasm). Without this, the bin keeps the hyphenated package
+# name and the release pattern silently fails to match the artifact.
+[[bin]]
+name = "zellij_whisper_talk"
+path = "src/main.rs"
+
 [dependencies]
 zellij-tile = "0.44.1"

@@ -69,7 +69,9 @@ _AUDIO_RATE = "16000"
 _AUDIO_CHANNELS = "1"
 
 _ARECORD_CMD = ["arecord", "-f", "S16_LE", "-c", _AUDIO_CHANNELS, "-r", _AUDIO_RATE, "-t", "wav"]
-_PWRECORD_CMD = ["pw-record", "--format", "s16", "--rate", _AUDIO_RATE, "--channels", _AUDIO_CHANNELS, "-o"]
+# pw-record takes the output file as a POSITIONAL argument ([options] [<file>|-]);
+# it has no -o flag. build_recorder_command appends audio_path positionally.
+_PWRECORD_CMD = ["pw-record", "--format", "s16", "--rate", _AUDIO_RATE, "--channels", _AUDIO_CHANNELS]
 _PAREC_CMD = ["parec", "--file-format=wav", "--rate=" + _AUDIO_RATE, "--channels=" + _AUDIO_CHANNELS]
 
 _BACKEND_COMMANDS = {

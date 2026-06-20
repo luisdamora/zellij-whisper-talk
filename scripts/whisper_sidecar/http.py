@@ -65,7 +65,14 @@ def post_with_retry(
     the response body bytes. Returns the parsed JSON body as a dict. Raises the
     last error when all attempts are exhausted (caller exits non-zero).
     """
-    opener = open_request if open_request is not None else urllib.request.urlopen
+    # The injected open_request contract is (request, timeout) positional, but
+    # urllib.request.urlopen's 2nd positional arg is `data`, not `timeout` — so
+    # the default must pass timeout as a keyword or it becomes the POST body.
+    opener = (
+        open_request
+        if open_request is not None
+        else (lambda req, to: urllib.request.urlopen(req, timeout=to))
+    )
     data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(
         url,

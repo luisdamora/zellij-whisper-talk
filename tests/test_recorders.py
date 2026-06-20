@@ -103,7 +103,7 @@ class BuildRecorderCommandTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-t") + 1], "wav")
         self.assertEqual(cmd[-1], "/tmp/a.wav")
 
-    def test_pw_record_uses_s16_16k_mono_and_output_target(self):
+    def test_pw_record_uses_s16_16k_mono_and_positional_output(self):
         # pw-record writes RAW samples (no WAV header) -> s16 keeps it
         # wrappable by stdlib `wave` (which only supports int PCM).
         from whisper_sidecar.recorders import build_recorder_command
@@ -116,8 +116,9 @@ class BuildRecorderCommandTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--rate") + 1], "16000")
         self.assertIn("--channels", cmd)
         self.assertEqual(cmd[cmd.index("--channels") + 1], "1")
-        self.assertIn("-o", cmd)
-        self.assertEqual(cmd[cmd.index("-o") + 1], "/tmp/raw.pcm")
+        # pw-record has no -o flag; the output file is positional (last arg).
+        self.assertNotIn("-o", cmd)
+        self.assertEqual(cmd[-1], "/tmp/raw.pcm")
 
     def test_parec_uses_native_wav_file_format(self):
         # parec can emit WAV directly via --file-format=wav.

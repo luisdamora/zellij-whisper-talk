@@ -209,5 +209,45 @@ class PostWithRetryTest(unittest.TestCase):
         self.assertEqual(seen["auth"], "Bearer sk-secret-123")
 
 
+class DefaultOpenerTest(unittest.TestCase):
+    """Exercise the real default opener (no open_request injected).
+
+    Regression for: the default called ``urlopen(request, timeout)`` positionally,
+    but urlopen's 2nd positional arg is ``data`` — so ``timeout`` became the POST
+    body, raising "message_body should be a bytes-like object ... got int".
+    """
+
+    def test_default_opener_passes_timeout_as_keyword_and_json_body(self):
+        import whisper_sidecar.http as http_mod
+
+        captured = {}
+
+        def fake_urlopen(request, *args, **kwargs):
+            captured["data"] = request.data
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _fake_response({"text": "ok"})
+
+        original = http_mod.urllib.request.urlopen
+        http_mod.urllib.request.urlopen = fake_urlopen
+        try:
+            result = post_with_retry(
+                "https://example.test/api",
+                body={"input": "x"},
+                key="sk-test",
+                timeout=17,
+            )
+        finally:
+            http_mod.urllib.request.urlopen = original
+
+        self.assertEqual(result, {"text": "ok"})
+        # timeout must arrive as a keyword, never as the positional `data` slot.
+        self.assertEqual(captured["args"], ())
+        self.assertEqual(captured["kwargs"], {"timeout": 17})
+        # the POST body must be the JSON-encoded bytes, not an int.
+        self.assertIsInstance(captured["data"], (bytes, bytearray))
+        self.assertEqual(json.loads(captured["data"].decode("utf-8")), {"input": "x"})
+
+
 if __name__ == "__main__":
     unittest.main()

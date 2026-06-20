@@ -15,6 +15,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run sidecar and installer tests
+        run: |
+          set -euo pipefail
+          # Python sidecar (stdlib-only) unit tests.
+          PYTHONPATH=scripts python3 -m unittest discover -s tests -p 'test_*.py'
+          # Installer structural + behavioral tests.
+          bash tests/install_sh_test.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -30,11 +43,34 @@ jobs:
       - name: Build WASM
         run: cargo build --release --locked --target wasm32-wasip1
 
+      - name: Package sidecar and verify artifacts
+        run: |
+          set -euo pipefail
+          WASM=target/wasm32-wasip1/release/zellij_whisper_talk.wasm
+
+          # Smoke gate: the artifact must exist and start with the WASM magic
+          # number (\0asm). This catches a build/name mismatch BEFORE upload.
+          test -f "$WASM" || { echo "::error::missing wasm artifact $WASM"; exit 1; }
+          magic=$(head -c 4 "$WASM" | od -An -tx1 | tr -d ' \n')
+          test "$magic" = "0061736d" || { echo "::error::bad wasm magic: $magic"; exit 1; }
+
+          # Bundle the multi-file Python sidecar (entrypoint + package) so the
+          # installer can ship it as one atomic, future-proof asset.
+          tar --exclude='__pycache__' -czf zellij_whisper_talk_sidecar.tar.gz \
+            -C scripts transcribe.py whisper_sidecar
+
+          # Verify the tarball actually contains the package, not just the stub.
+          tar -tzf zellij_whisper_talk_sidecar.tar.gz | grep -q 'whisper_sidecar/config.py' \
+            || { echo "::error::sidecar tarball missing whisper_sidecar package"; exit 1; }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # fail_on_unmatched_files makes CI go RED if any asset is missing,
+          # instead of silently publishing an incomplete (broken) release.
+          fail_on_unmatched_files: true
           files: |
             target/wasm32-wasip1/release/zellij_whisper_talk.wasm
-            scripts/transcribe.py
+            zellij_whisper_talk_sidecar.tar.gz
             scripts/install.sh
           generate_release_notes: true

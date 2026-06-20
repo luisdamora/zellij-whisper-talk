@@ -68,10 +68,12 @@ fail()    { echo -e "  ${RED}✗${RESET} $1"; exit 1; }
 section "Checking prerequisites"
 
 command -v curl  >/dev/null 2>&1 || fail "curl is required but not found."
-command -v arecord >/dev/null 2>&1 || warn "arecord not found. Install alsa-utils for microphone support."
+command -v tar   >/dev/null 2>&1 || fail "tar is required but not found."
 command -v python3 >/dev/null 2>&1 || fail "python3 is required but not found."
+command -v arecord >/dev/null 2>&1 || command -v pw-record >/dev/null 2>&1 || command -v parec >/dev/null 2>&1 \
+    || warn "No audio recorder found. Install pipewire (pw-record), pulseaudio (parec), or alsa-utils (arecord)."
 
-success "curl, python3 available"
+success "curl, tar, python3 available"
 
 # ── Interactive prompts ─────────────────────────────────────────────────────
 # When run via `curl ... | bash`, the script itself is on stdin (fd 0) and bash
@@ -127,26 +129,43 @@ section "Downloading plugin"
 
 mkdir -p "$PLUGINS_DIR"
 
+# -f makes curl FAIL on HTTP errors (404/5xx) instead of silently writing the
+# error page body ("Not Found") into the destination file.
 echo "  Downloading WASM plugin..."
-curl -sSL "${RELEASE_URL}/zellij_whisper_talk.wasm" -o "${PLUGINS_DIR}/zellij_whisper_talk.wasm"
-success "zellij_whisper_talk.wasm"
+curl -fsSL "${RELEASE_URL}/zellij_whisper_talk.wasm" -o "${PLUGINS_DIR}/zellij_whisper_talk.wasm" \
+    || fail "Failed to download the WASM plugin (HTTP error). The release may be incomplete."
 
-echo "  Downloading host script..."
-curl -sSL "${RELEASE_URL}/transcribe.py" -o "${PLUGINS_DIR}/transcribe.py"
-chmod +x "${PLUGINS_DIR}/transcribe.py"
-success "transcribe.py (executable)"
+# Verify it's a real WebAssembly module (magic '\0asm' = 00 61 73 6d), not an
+# HTML/'Not Found' page that a non-failing download would have saved verbatim.
+WASM_MAGIC=$(head -c 4 "${PLUGINS_DIR}/zellij_whisper_talk.wasm" | od -An -tx1 | tr -d ' \n')
+[[ "$WASM_MAGIC" == "0061736d" ]] \
+    || fail "Downloaded WASM is invalid (magic: ${WASM_MAGIC:-empty}). The release asset may be missing."
+success "zellij_whisper_talk.wasm (verified)"
+
+# The sidecar is a multi-file Python package (transcribe.py + whisper_sidecar/),
+# shipped as one tarball so it stays atomic and future-proof.
+echo "  Downloading host sidecar..."
+SIDECAR_TARBALL="$(mktemp)"
+curl -fsSL "${RELEASE_URL}/zellij_whisper_talk_sidecar.tar.gz" -o "$SIDECAR_TARBALL" \
+    || fail "Failed to download the sidecar package (HTTP error)."
+tar -xzf "$SIDECAR_TARBALL" -C "$PLUGINS_DIR" || fail "Failed to extract the sidecar package."
+rm -f "$SIDECAR_TARBALL"
+chmod +x "${PLUGINS_DIR}/transcribe.py" 2>/dev/null || true
+[[ -f "${PLUGINS_DIR}/whisper_sidecar/config.py" ]] \
+    || fail "Sidecar package incomplete after extraction (missing whisper_sidecar/)."
+success "transcribe.py + whisper_sidecar/ (extracted)"
 
 # ── Configure Zellij ────────────────────────────────────────────────────────
 section "Configuring Zellij"
 
 mkdir -p "$ZELLIJ_DIR"
 
-# Self-contained keybinds block. Zellij merges multiple top-level `keybinds {}`
-# blocks, and `shared_except` MUST be nested inside one — so we always wrap it,
-# both when appending to an existing config and when creating a fresh one.
-KEYBINDS_BLOCK=$(cat <<KDL
-
-keybinds {
+# Zellij processes only the FIRST top-level `keybinds {}` block and silently
+# ignores any later ones — so a second appended block would never bind. The
+# `shared_except` entry must be nested INSIDE the existing keybinds block.
+# INNER_BLOCK is that entry; WRAPPED_BLOCK adds the keybinds wrapper for a fresh
+# config (or a config that has no keybinds block yet).
+INNER_BLOCK=$(cat <<KDL
     shared_except "locked" {
         bind "${KEYBIND}" {
             LaunchOrFocusPlugin "file:${PLUGINS_DIR}/zellij_whisper_talk.wasm" {
@@ -156,28 +175,67 @@ keybinds {
             }
         }
     }
+KDL
+)
+
+WRAPPED_BLOCK=$(cat <<KDL
+
+keybinds {
+${INNER_BLOCK}
 }
 KDL
 )
 
-if [[ -f "$CONFIG_FILE" ]]; then
-    # Backup existing config
-    BACKUP="${CONFIG_FILE}.backup.$(date +%s)"
-    cp "$CONFIG_FILE" "$BACKUP"
-
-    # Check if plugin is already configured
-    if grep -q "zellij_whisper_talk.wasm" "$CONFIG_FILE" 2>/dev/null; then
-        warn "Plugin already configured in $CONFIG_FILE — skipping config injection."
-        echo "  Backup saved to: $BACKUP"
-    else
-        echo "$KEYBINDS_BLOCK" >> "$CONFIG_FILE"
-        success "Keybinding appended to $CONFIG_FILE"
-        echo "  Backup saved to: $BACKUP"
-    fi
+if [[ -f "$CONFIG_FILE" ]] && grep -q "zellij_whisper_talk.wasm" "$CONFIG_FILE" 2>/dev/null; then
+    warn "Plugin already configured in $CONFIG_FILE — skipping config injection."
 else
-    # Create fresh config
-    echo "$KEYBINDS_BLOCK" > "$CONFIG_FILE"
-    success "Created new config at $CONFIG_FILE"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        BACKUP="${CONFIG_FILE}.backup.$(date +%s)"
+        cp "$CONFIG_FILE" "$BACKUP"
+    fi
+
+    # Insert into an existing keybinds block if present; otherwise create/append
+    # a wrapped block. python3 is a hard prerequisite, so KDL editing is robust.
+    RESULT=$(INNER_BLOCK="$INNER_BLOCK" WRAPPED_BLOCK="$WRAPPED_BLOCK" \
+        python3 - "$CONFIG_FILE" <<'PY'
+import os, re, sys
+
+path = sys.argv[1]
+inner = os.environ["INNER_BLOCK"].rstrip("\n") + "\n"
+wrapped = os.environ["WRAPPED_BLOCK"].rstrip("\n") + "\n"
+
+try:
+    with open(path) as fh:
+        lines = fh.readlines()
+except FileNotFoundError:
+    lines = []
+
+out, inserted = [], False
+for line in lines:
+    out.append(line)
+    # First top-level `keybinds {` (or `keybinds clear-defaults=true {`) opener.
+    if not inserted and re.match(r"\s*keybinds\b.*\{\s*$", line):
+        out.append(inner)
+        inserted = True
+
+if not inserted:
+    if out and not out[-1].endswith("\n"):
+        out.append("\n")
+    out.append(wrapped)
+
+with open(path, "w") as fh:
+    fh.writelines(out)
+
+print("inserted" if inserted else "created")
+PY
+    )
+
+    if [[ "$RESULT" == "inserted" ]]; then
+        success "Keybinding inserted into existing keybinds block in $CONFIG_FILE"
+    else
+        success "Keybinding written to $CONFIG_FILE"
+    fi
+    [[ -n "${BACKUP:-}" ]] && echo "  Backup saved to: $BACKUP"
 fi
 
 # ── Environment variable hint ────────────────────────────────────────────────
